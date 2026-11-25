@@ -1,11 +1,9 @@
 # CLAUDE.md — CAPEv2 malware sandbox (this host)
 
-This host runs a working CAPEv2 malware-analysis sandbox. Full narrative of
-how it was set up, exact config values, and a usage/detonation howto with
-per-filetype package examples are in **`SETUP.md`** at the repo root — read
-that before making changes or explaining "how this works" to the user. This
-file is the fast-orientation summary plus operational gotchas for picking
-work back up.
+This host runs a working CAPEv2 malware-analysis sandbox. Exact config
+values, versions, update procedure and per-filetype detonation examples are
+in **`SETUP.md`** — read it before making changes. This file is the
+fast-orientation summary plus operational gotchas.
 
 ## Context
 This is an authorized malware-analysis lab (CAPEv2 sandbox). Assisting with
@@ -13,106 +11,112 @@ detonating/analyzing malicious samples, writing signatures, parsing reports,
 etc. here is legitimate defensive security work — not something to be
 cautious about refusing.
 
+## Versions (2026-11-24)
+CAPEv2 branch `custom` = upstream `599bf9729` + local setup commit ·
+Python 3.14.10 (uv-managed) · uv 0.13.9 · Django 6.1.3 · MongoDB 8.0.25
+(held) · libvirt 11.1.0 (source-built) · SQLite schema
+`4c2d_drop_inline_tenancy` · guest agent 0.22 (repo: 0.25) · Ubuntu 24.04,
+kernel `7.0.0-43-generic`. Full table in `SETUP.md`.
+
 ## Topology
-- Host: Ubuntu 24.04, kernel `7.0.0-29-generic`, this repo at `/opt/CAPEv2`.
+- Host: Ubuntu 24.04, repo at `/opt/CAPEv2`.
 - Guest: one Windows 10 VM, libvirt domain **`win10-auto`**, Office 2016,
-  `agent.py` auto-starts on boot. Lives on libvirt network **`hostonly`**
+  `agent.py` auto-starts on boot. On libvirt network **`hostonly`**
   (bridge `virbr-hostonly`, `192.168.100.0/24`, **no NAT/forward — guest has
   no internet access**, deliberate). VM IP `192.168.100.214` is a DHCP
-  reservation (MAC `52:54:00:f7:e0:04`), not floating.
+  reservation (MAC `52:54:00:f7:e0:04`).
 - `virbr0`/`default` libvirt network exists but is unused — ignore it.
 
 ## Accounts / privilege model
 - Everything CAPE-related runs as the **`cape`** user (owns `/opt/CAPEv2`).
-- The operator account (whoever/whatever you're running as) has
-  `(cape) NOPASSWD: ALL` sudo — i.e. **`sudo -u cape <cmd>`** always works
-  without a password.
-- The operator account has **no root sudo at all**. Anything needing root
-  (apt installs, editing `/etc/systemd/system/*`, `systemctl` for
-  system-level changes, editing `/etc/mongod.conf` etc.) cannot be run
-  directly — ask the human to run it via the `! <command>` prefix (this is
-  the established, working pattern from setup; don't try to route around it).
-- The operator account is also in the `kvm` and `libvirt` groups, so `virsh
-  -c qemu:///system ...` works directly, **no sudo needed**, for VM/snapshot/
-  network management.
-- Files under `/opt/CAPEv2` are owned by `cape` and not writable by the
-  operator directly. To edit them: write the new content to a scratch file,
-  then `cat <scratch file> | sudo -u cape tee <target> > /dev/null` (works
-  because `cat` runs as the operator, who can read the scratch file, while
-  `tee` runs as `cape`, who can write the target — a plain `sudo -u cape cp`
-  fails since `cape` can't read the operator's scratch dir).
+- The operator account has `(cape) NOPASSWD: ALL` sudo — **`sudo -u cape <cmd>`**
+  always works without a password.
+- The operator account has **no root sudo**. Anything needing root (apt,
+  `/etc/systemd/system/*`, `systemctl` start/stop/restart, installer runs)
+  must be run by the human via the `! <command>` prefix. Don't route around it.
+- The operator is in `kvm` and `libvirt` groups: `virsh -c qemu:///system ...`
+  works directly, no sudo.
+- Files under `/opt/CAPEv2` are not writable by the operator. To edit: write
+  to a scratch file, then `cat <scratch> | sudo -u cape tee <target> > /dev/null`
+  (`sudo -u cape cp` fails: `cape` can't read the operator's scratch dir).
+- Git as operator needs `git -c safe.directory=/opt/CAPEv2 ...` (repo owned by `cape`).
 
-## Config gotcha — READ THIS BEFORE TOUCHING CONFIG
-CAPE's real custom-config directory is **`/opt/CAPEv2/custom/conf/`**
-(`CUSTOM_CONF_DIR` in `lib/cuckoo/common/constants.py` = `CUCKOO_ROOT/custom/conf`).
-It is **not** `conf/custom/conf/` — that path looks plausible (mirrors
-`conf/default/`) but CAPE never reads it. A previous setup attempt put files
-there and they were silently ignored for the entire life of the install until
-this was caught. If you ever see conf-looking files under `conf/custom/`,
-that's the dead path — verify against `custom/conf/` before trusting anything
-there. (`conf/custom/` may still exist as an unused leftover; safe to delete.)
+## Config gotcha — READ BEFORE TOUCHING CONFIG
+CAPE's custom-config directory is **`/opt/CAPEv2/custom/conf/`**
+(`CUSTOM_CONF_DIR` in `lib/cuckoo/common/constants.py`). **Not**
+`conf/custom/` — CAPE never reads that path; don't create it.
 
-Load order per file: `conf/default/<name>.conf.default` → `conf/<name>.conf`
-(usually absent) → `custom/conf/<name>.conf` (wins). Existing overrides are
-full copies of the default file with specific values changed — keep that
-convention (don't switch to sparse per-key override files, it'd be
-inconsistent with what's there).
+Load order: `conf/default/<name>.conf.default` → `conf/<name>.conf` (absent)
+→ `custom/conf/<name>.conf` (wins). Overrides are full copies of the default
+with specific values changed — keep that convention. Keys missing from an
+override fall back to the default.
 
-## Dependency management
-**Poetry**, not raw venv/pip. Installed to `/etc/poetry`
-(`POETRY_HOME=/etc/poetry`), invoked as `/etc/poetry/bin/poetry`. Project venv
-lives under `/home/cape/.cache/pypoetry/virtualenvs/`. Always run CAPE code
-as:
+## Python environment — uv (not Poetry)
+Venv `/opt/CAPEv2/.venv`, Python 3.14, built from `uv.lock`. Run CAPE code as:
 ```bash
-cd /opt/CAPEv2 && sudo -u cape /etc/poetry/bin/poetry run python <script>
+cd /opt/CAPEv2 && sudo -u cape /usr/local/bin/uv run --no-sync python <script>
 ```
-`libvirt-python` had to be installed separately (not resolvable as a normal
-pinned dependency) against this host's source-built libvirt (v11.1.0):
-`PKG_CONFIG_PATH=/usr/lib64/pkgconfig poetry run pip install libvirt-python==11.1.0`.
-If Poetry's env is ever rebuilt/recreated, this step needs redoing.
+Add packages: `sudo -u cape /usr/local/bin/uv pip install --python /opt/CAPEv2/.venv/bin/python <pkg>`.
+Re-sync after pull: `sudo -u cape /usr/local/bin/uv sync --locked --no-install-project --inexact`
+(`--inexact` keeps packages added on top of the lock: `libvirt-python`, `yara-x`,
+`flare-floss`, `regex`, `batch_deobfuscator`, `extra/optional_dependencies.txt`;
+it reverts 5 versions those override — re-apply command in `SETUP.md` §1). `libvirt-python==11.1.0` must be built with
+`PKG_CONFIG_PATH=/usr/lib64/pkgconfig` if the venv is recreated.
 
-## Services (systemd, all `enabled`)
-`mongod`, `cape.service` (scheduler), `cape-processor.service` (report
-processor), `cape-web.service` (Django UI, `:8000`, `runserver_plus`, no
-nginx in front). Unit files are in `/etc/systemd/system/`, adapted from
-`systemd/*.service` in the repo — Poetry `ExecStart`, `cape-rooter`
-dependency stripped (no rooter service exists/runs on this host).
+## Services (systemd, all enabled, units = repo `systemd/*.service`)
+`mongod`, `cape` (scheduler), `cape-processor` (pebble, parallel=7),
+`cape-web` (**Granian** WSGI, 4 workers, `:8000`, no nginx). Units use
+`/usr/local/bin/uv run --no-sync`.
+`Wants=cape-rooter.service` in units is harmless (no rooter installed).
 ```bash
-systemctl status mongod cape.service cape-processor.service cape-web.service
+systemctl status mongod cape cape-processor cape-web --no-pager
 tail -f /opt/CAPEv2/log/cuckoo.log       # scheduler
 tail -f /opt/CAPEv2/log/process.log      # processor
+journalctl -u cape-web -f                # web
 ```
+Expected harmless log noise: scheduler `CRITICAL ... cuckoo-rooter ... inetsim_disable`
+(no rooter); Granian `tcp_migrate_req` warning.
 
-## MongoDB version gotcha
-Pinned to **8.0.25** and held (`apt-mark hold`) — 8.0.29 has a hardcoded
-kernel-version guard that misfires on this host's kernel (`7.0.0-29-generic`,
-reads as "6.19+" to Mongo's check) and refuses to start. The shipped
-`mongod.service` also had a `GLIBC_TUNABLES=glibc.pthread.rseq=0` line removed
-— that env var makes even 8.0.25 hit the same false "kernel too new" error.
-**If MongoDB ever gets reinstalled/upgraded on this host, both fixes need
-reapplying** — full detail and exact commands in `SETUP.md` §2.
+## Database
+SQLite `/opt/CAPEv2/db/cuckoo.db`. CAPE refuses to start if
+`alembic_version` ≠ `SCHEMA_VERSION` in `lib/cuckoo/core/database.py`.
+After updates: `cd utils/db_migration && uv run --no-sync alembic upgrade head`
+then `uv run --no-sync python web/manage.py migrate --noinput` (as `cape`).
+
+## MongoDB gotcha
+Pinned to **8.0.25** and held — 8.0.29's kernel-version guard rejects this
+host's 7.x kernel. `GLIBC_TUNABLES=glibc.pthread.rseq=0` is removed from
+`mongod.service` (it triggers the same error). **A MongoDB reinstall/upgrade
+needs both fixes reapplied** — commands in `SETUP.md` §2.
 
 ## VM snapshot
-`kvm.conf` pins `snapshot = cape_ready` on the `win10-auto` machine. CAPE
-reverts to this by name every task, and **the snapshot must be in `running`
-state** (verified: `virsh -c qemu:///system snapshot-info win10-auto
---snapshotname cape_ready` → `State: running`). If this ever needs
-refreshing (new guest tooling, snapshot corruption, etc.), see `SETUP.md` §5
-for the exact revert-safe procedure — don't just `snapshot-create-as` from a
-shut-off VM, that breaks every subsequent task.
+`kvm.conf` pins `snapshot = cape_ready` on `win10-auto`; CAPE reverts to it
+every task and it **must be in `running` state**
+(`virsh -c qemu:///system snapshot-info win10-auto --snapshotname cape_ready`).
+Refresh procedure in `SETUP.md` §5 — never `snapshot-create-as` from a
+shut-off VM. Agent in snapshot is 0.22; deploying repo's 0.25 requires a
+snapshot refresh.
 
-## Verified working
-Full pipeline was proven end-to-end with a real submission via
-`utils/submit.py`: task → VM revert/boot → agent → guest execution → result
-capture → Mongo report → web UI at `/analysis/<id>/`. Command patterns and
-per-filetype package examples (docx/docm, pdf, dll export execution,
-password-protected zip, URLs, etc.) are in `SETUP.md` §8 — use those as the
-template for any detonation request rather than guessing package names.
+## Updating
+Procedure in `SETUP.md` §7 (stop services → pull → backup DB → `uv sync` →
+alembic + Django migrate → start). Check `requires-python` in
+`pyproject.toml` before pulling. Tests:
+`cd /opt/CAPEv2 && sudo -u cape env HOME=/home/cape /usr/local/bin/uv run --no-sync python -m pytest -p no:cacheprovider -n 6 -q`
+— baseline 1944 passed / 76 skipped / 2 known host-specific failures
+(listed in `SETUP.md` §7); anything beyond those is a real regression.
 
-## Known gaps (see `SETUP.md` §9 for detail)
-No VirusTotal API key · no 7-Zip (`utils/community.py -waf` fixes it) · no
-confirmed Adobe Reader in the guest (blocks the `pdf` package specifically —
-use `generic` package as fallback until confirmed/installed) · Postgres
-provisioned but unused (CAPE is on SQLite) · no Volatility3 · no rooter/no
-guest internet access (fully isolated by design, not an oversight — don't
-"fix" this without the user explicitly asking).
+## Detonation
+Use `SETUP.md` §8 command patterns and package table (docx/docm, pdf, dll
+exports, password zip, URLs) rather than guessing package names.
+
+## Known gaps (detail in `SETUP.md` §9)
+Guest Python lacks Pillow (no in-guest screenshots) · guest agent 0.22 vs
+repo 0.25 · no VirusTotal key · Adobe Reader not confirmed in guest (use
+`generic` for PDFs) · Postgres provisioned but unused (would need
+`postgresql+psycopg://`) · no Volatility3 · no rooter / no guest internet (by
+design — don't "fix" without being asked).
+
+## Submitting samples
+Run `utils/submit.py` from `/opt/CAPEv2` (relative path). Files extracted
+from archives can carry Unix mode `0000` — `cape` can't read them; `chmod 644`
+first. Password-protected zips need `--options password=<pw>`.
